@@ -7,19 +7,20 @@ import matplotlib.gridspec as gridspec
 import warnings
 warnings.filterwarnings('ignore')
 
-# Physical / grid parameters (same as main())
 Nx, Ny   = 20, 20
 x0, xL   = -1.0,  1.0
 y0, yL   = -0.5,  0.5
-params   = {'a': 0.6, 'k': 1000.0, 'ky': 1500.0, 'delta': 0, 'd': 1.0}
 kappa    = 2326.0    # Coulomb strength (Mott-Hubbard crossover, U/t ~ 1)
-epsilon  = 0.01       # Coulomb softening length
-Nstates  = 40  
-M_LOC     = 32  # localisation subspace size (try 8, 12, 16, ...)
-X_CUT     = 0.0    # dividing surface between wells (barrier centre)
-SMOOTH_PL = True
-SIGMA_PL  = 0.03 
-N_CI_COMPUTE  = 200      # SP orbitals to retain
+epsilon  = 0.01 
+Nstates  = 40   
+params   = {'a': 0.6, 'k': 1000.0, 'ky': 1500.0, 'delta': 0.0, 'd': 1.0}
+N_CI_COMPUTE  = 200   # raised from 40; covers L0-L4 x R0-R4
+SMOOTH_PL = False
+M_LOC     =32     # localisation subspace size (try 8, 12, 16, ...)
+X_CUT     = 0.0       # dividing surface between wells (barrier centre)
+SIGMA_PL  = 0.03      
+
+
 
 def sine_dvr_1d(x0, xL, N):
     """1-D sine-DVR on [x0, xL] with N grid points.  hbar^2/2m = 1."""
@@ -51,7 +52,7 @@ def double_well_potential(x, y, params):
 
 def build_potential_matrix(x_grid, y_grid, params):
     X, Y = np.meshgrid(x_grid, y_grid, indexing='ij')
-    V    = double_well_potential(X, Y, params).ravel()
+    V = double_well_potential(X, Y, params).ravel()
     return np.diag(V)
 
 V2D = build_potential_matrix(x_grid, y_grid, params)
@@ -81,12 +82,12 @@ def localise_orbitals_projector_DVR(single_vecs, x_grid, y_grid,
                                     M=16, x_cut=0.0, smooth=True, sigma=0.03):
     PLg = build_left_projector_mask(x_grid, y_grid, x_cut=x_cut,
                                     smooth=smooth, sigma=sigma)   # (G,)
-    V = single_vecs[:, :M]                                        # (G,M)
+    V = np.asarray(single_vecs[:, :M], dtype=complex)             # (G,M)
 
     # Psub_ij = <psi_i | PL | psi_j> in the DVR inner product
-    Psub = V.T @ (PLg[:, None] * V)
+    Psub = V.conj().T @ (PLg[:, None] * V)
 
-    lam, U = eigh(Psub)
+    lam, U = eigh((Psub + Psub.conj().T) / 2.0)
     idx = np.argsort(lam)[::-1]
     lam, U = lam[idx], U[:, idx]
 
@@ -94,7 +95,7 @@ def localise_orbitals_projector_DVR(single_vecs, x_grid, y_grid,
     labels = np.array(['L' if l > 0.5 else 'R' for l in lam], dtype=object)
 
     # sanity: orthonormality in DVR inner product
-    S = vecs_loc.T @ vecs_loc
+    S = vecs_loc.conj().T @ vecs_loc
     return U, vecs_loc, lam, labels, S
 
 U_loc, vecs_loc, lam_loc, lr_labels, S_ortho = localise_orbitals_projector_DVR(
@@ -230,12 +231,14 @@ K = precompute_coulomb_kernel(x_grid, y_grid, w_x, w_y, kappa, epsilon)
 
 def build_ci_hamiltonian(slater_basis, single_energies, sv, K, n_compute=40):
     n  = min(n_compute, len(slater_basis))
-    H  = np.zeros((n, n))
+    H  = np.zeros((n, n), dtype=complex)
     _te_cache = {}
     def te(a, b, c, d):
         key = (a, b, c, d)
         if key not in _te_cache:
-            _te_cache[key] = float((sv[:, a] * sv[:, c]) @ K @ (sv[:, b] * sv[:, d]))
+            left  = np.conj(sv[:, a]) * sv[:, c]
+            right = np.conj(sv[:, b]) * sv[:, d]
+            _te_cache[key] = left @ K @ right
         return _te_cache[key]
 
     for I in range(n):
@@ -243,30 +246,34 @@ def build_ci_hamiltonian(slater_basis, single_energies, sv, K, n_compute=40):
         same_I = (a_I == b_I)
         for J in range(I, n):
             a_J, b_J, _, stype_J = slater_basis[J]
-            if stype_I != stype_J: continue
-            same_J = (a_J == b_J); val = 0.0
+            if stype_I != stype_J:
+                continue
+            same_J = (a_J == b_J)
+            val = 0.0 + 0.0j
             if I == J:
                 val += single_energies[a_I] + single_energies[b_I]
             if stype_I == 'singlet':
                 if same_I and same_J:
-                    if a_I == a_J: val += te(a_I, a_I, a_I, a_I)
-                    else:          val += 2.0 * te(a_I, a_J, a_I, a_J)
-                elif same_I:  val += np.sqrt(2.0) * te(a_I, a_J, a_I, b_J)
-                elif same_J:  val += np.sqrt(2.0) * te(a_I, a_J, b_I, a_J)
-                else:         val += te(a_I, a_J, b_I, b_J) + te(a_I, b_J, b_I, a_J)
+                    if a_I == a_J:
+                        val += te(a_I, a_I, a_I, a_I)
+                    else:
+                        val += 2.0 * te(a_I, a_J, a_I, a_J)
+                elif same_I:
+                    val += np.sqrt(2.0) * te(a_I, a_J, a_I, b_J)
+                elif same_J:
+                    val += np.sqrt(2.0) * te(a_I, a_J, b_I, a_J)
+                else:
+                    val += te(a_I, a_J, b_I, b_J) + te(a_I, b_J, b_I, a_J)
             else:
                 if not same_I and not same_J:
                     val += te(a_I, a_J, b_I, b_J) - te(a_I, b_J, b_I, a_J)
             H[I, J] += val
-            if I != J: H[J, I] = H[I, J]
-    return H
+            if I != J:
+                H[J, I] = np.conj(H[I, J])
+    return 0.5 * (H + H.conj().T)
 
-slater_basis = build_slater_basis_sorted(Nstates, single_energies)
-n_compute    = min(N_CI_COMPUTE, len(slater_basis))
-H_slater     = build_ci_hamiltonian(slater_basis, single_energies,
-                                     single_vecs, K, n_compute)
-E2, C2 = eigh(H_slater)
 
+# Config label helper
 def cfg_label(a, b):
     wa = well.get(a, 'D'); wb = well.get(b, 'D')
     def lbl(idx, w):
@@ -283,58 +290,13 @@ _SPIN_TABLE = {
 }
 
 
-def compute_spin_and_entanglement(eigenstate_coeffs, slater_basis, Nb):
-    """<S^2>, <Sz> and von Neumann entropy of the 1-RDM."""
-    coeffs = np.asarray(eigenstate_coeffs, dtype=complex)
-    probs  = np.abs(coeffs)**2
-    S2 = Sz = 0.0
-    for i, (_, _, _, st) in enumerate(slater_basis):
-        s2, sz = _SPIN_TABLE.get(st, (0., 0.))
-        S2 += probs[i] * s2
-        Sz += probs[i] * sz
-    d   = 2 * Nb
-    rho = np.zeros((d, d), dtype=complex)
-    for i, c in enumerate(coeffs):
-        if abs(c) < 1e-12:
-            continue
-        a, b, _, stype = slater_basis[i]
-        ia_up, ia_dn = 2*a, 2*a+1
-        ib_up, ib_dn = 2*b, 2*b+1
-        if a == b:
-            f = c / np.sqrt(2)
-            rho[ia_up, ia_dn] += f
-            rho[ia_dn, ia_up] -= f
-        elif stype == 'singlet':
-            f = c / 2.
-            rho[ia_up, ib_dn] += f
-            rho[ia_dn, ib_up] -= f
-            rho[ib_up, ia_dn] += f
-            rho[ib_dn, ia_up] -= f
-        elif stype == 'triplet_p':
-            f = c / np.sqrt(2)
-            rho[ia_up, ib_up] += f
-            rho[ib_up, ia_up] -= f
-        elif stype == 'triplet_0':
-            f = c / 2.
-            rho[ia_up, ib_dn] += f
-            rho[ia_dn, ib_up] += f
-            rho[ib_up, ia_dn] -= f
-            rho[ib_dn, ia_up] -= f
-        elif stype == 'triplet_m':
-            f = c / np.sqrt(2)
-            rho[ia_dn, ib_dn] += f
-            rho[ib_dn, ia_dn] -= f
-    rho1 = rho @ rho.conj().T
-    eigv = np.linalg.eigvalsh((rho1 + rho1.conj().T) / 2.0)
-    eigv = eigv[eigv > 1e-12]
-    ent  = float(-np.dot(eigv, np.log(eigv))) if len(eigv) else 0.
-    return float(S2), float(Sz), ent
 
 
 def ci_to_spinorbital_Omega(coeffs, slater_basis, Nb):
     """
     Build antisymmetric 2-fermion amplitude matrix Ω_{pq} (p,q are spin-orbital indices)
     from CI coefficients in the spin-adapted slater_basis.
+    NB: Gets built for one state only, so pass in the coeffs for that state (e.g. C2[:, n]) and the full slater_basis.
 
     This matches the structure used in compute_spin_and_entanglement(), but returns Ω.
     Conventions:
@@ -418,6 +380,7 @@ def Omega_to_rho2_pair(Om, tol=1e-14):
     """
     Om: antisymmetric amplitude matrix Ω in spin-orbital basis (d x d)
     Returns: rho2 in antisymmetrised pair basis |pq> (p<q), size n2 x n2, trace=1
+    This is the 2-fermion density matrix in the pair basis, which is rank-1 for pure states. Which state is determined by the input Ω.
     """
     d = Om.shape[0]
     pairs, pidx = pair_basis(d)
@@ -432,9 +395,8 @@ def Omega_to_rho2_pair(Om, tol=1e-14):
         raise ValueError("State norm ~0 in pair basis; check Ω construction.")
     amp = amp / np.sqrt(nrm)
 
-    rho2 = np.outer(amp, amp.conj())
+    rho2 = np.outer(amp, amp.conj()) #Density matrix coefficients in pair basis
     return rho2, pairs
-
 
 # --- (E) Partial trace over right-well spin-orbitals to get ρ_L in NL=0,1,2 blocks ---
 
@@ -491,8 +453,6 @@ def rhoL_from_rho2_pairs_spin(rho2, pairs, mode_tags_spin):
 
     meta = dict(L_modes=L_modes, R_modes=R_modes, LL_pairs=LL_pairs)
     return rhoL0, rhoL1, rhoL2, meta
-
-
 # --- (F) Entropies ---
 
 def vn_entropy(rho, tol=1e-12):
@@ -523,12 +483,65 @@ def accessible_entropy(rhoL0, rhoL1, rhoL2, tol=1e-12):
         E += p2 * vn_entropy(rhoL2 / p2, tol)
     return float(E), (p0,p1,p2)
 
-
 mode_tags_spin = []
 for mu in range(M_LOC):
     mode_tags_spin.append(lr_labels[mu])  # up
     mode_tags_spin.append(lr_labels[mu])  # down
 
+
+_SPIN_TABLE = {
+    'singlet':   (0.0,  0.0),
+    'triplet_p': (2.0,  1.0),
+    'triplet_0': (2.0,  0.0),
+    'triplet_m': (2.0, -1.0),
+}
+
+def compute_spin_and_entanglement(eigenstate_coeffs, slater_basis, Nb):
+    """<S^2>, <Sz> and von Neumann entropy of the 1-RDM."""
+    coeffs = np.asarray(eigenstate_coeffs, dtype=complex)
+    probs  = np.abs(coeffs)**2
+    S2 = Sz = 0.0
+    for i, (_, _, _, st) in enumerate(slater_basis):
+        s2, sz = _SPIN_TABLE.get(st, (0., 0.))
+        S2 += probs[i] * s2
+        Sz += probs[i] * sz
+    d   = 2 * Nb
+    rho = np.zeros((d, d), dtype=complex)
+    for i, c in enumerate(coeffs):
+        if abs(c) < 1e-12:
+            continue
+        a, b, _, stype = slater_basis[i]
+        ia_up, ia_dn = 2*a, 2*a+1
+        ib_up, ib_dn = 2*b, 2*b+1
+        if a == b:
+            f = c / np.sqrt(2)
+            rho[ia_up, ia_dn] += f
+            rho[ia_dn, ia_up] -= f
+        elif stype == 'singlet':
+            f = c / 2.
+            rho[ia_up, ib_dn] += f
+            rho[ia_dn, ib_up] -= f
+            rho[ib_up, ia_dn] += f
+            rho[ib_dn, ia_up] -= f
+        elif stype == 'triplet_p':
+            f = c / np.sqrt(2)
+            rho[ia_up, ib_up] += f
+            rho[ib_up, ia_up] -= f
+        elif stype == 'triplet_0':
+            f = c / 2.
+            rho[ia_up, ib_dn] += f
+            rho[ia_dn, ib_up] += f
+            rho[ib_up, ia_dn] -= f
+            rho[ib_dn, ia_up] -= f
+        elif stype == 'triplet_m':
+            f = c / np.sqrt(2)
+            rho[ia_dn, ib_dn] += f
+            rho[ib_dn, ia_dn] -= f
+    rho1 = rho @ rho.conj().T
+    eigv = np.linalg.eigvalsh((rho1 + rho1.conj().T) / 2.0)
+    eigv = eigv[eigv > 1e-12]
+    ent  = float(-np.dot(eigv, np.log(eigv))) if len(eigv) else 0.
+    return float(S2), float(Sz), ent
 
 def purify_degenerate_spin_subspaces(E, C, slater_basis, energy_tol=1e-6, spin_tol=1e-8):
     """
@@ -603,65 +616,20 @@ def purify_degenerate_spin_subspaces(E, C, slater_basis, energy_tol=1e-6, spin_t
 # Easiest: build Ω on full 2*Nstates and then truncate to the 2*M_LOC block.
 
 def truncate_Omega_to_subspace(Om_full, M_LOC):
+    """Truncate Ω matrix to M_LOC spatial subspace (2*M_LOC spin-orbitals).
+    
+    Assertions verify that:
+    1. Om_full is large enough (built from Nstates >= M_LOC)
+    2. U_loc shape matches M_LOC (from localization step)
+    """
     d = 2*M_LOC
+    assert Om_full.shape[0] >= d, (
+        f"Om_full shape {Om_full.shape[0]} < expected minimum 2*M_LOC={d}. "
+        f"Check that Nstates >= M_LOC and M_LOC matches localization parameter."
+    )
+    assert U_loc.shape[0] == M_LOC, (
+        f"U_loc shape {U_loc.shape[0]} != M_LOC={M_LOC}. "
+        f"Localization was computed with different M_LOC!"
+    )
     return Om_full[:d, :d].copy()
 
-# Build U_spin (2*M_LOC x 2*M_LOC) for the basis rotation
-U_spin = spinorbital_U_from_spatial(U_loc)  # shape (2*M_LOC, 2*M_LOC)
-
-# Choose state index
-n_state = 0
-
-# 1) Ω in original (delocalised) spin-orbital basis (2*Nstates)
-Om_full = ci_to_spinorbital_Omega(C2[:, n_state], slater_basis[:n_compute], Nstates)
-
-# 2) truncate to the M_LOC spatial subspace
-Om_sub = truncate_Omega_to_subspace(Om_full, M_LOC)
-
-# 3) rotate to localised spin-orbitals: Ω' = U_spin Ω U_spin^T
-Om_loc = U_spin.conj().T @ Om_sub @ U_spin.conj()  # <-- careful: see note below
-# NOTE on conventions:
-# If you define new creation operators as d† = sum_a (U_spin)_{a,mu} c†_a,
-# then Ω transforms as Ω' = U_spin^T Ω U_spin.
-# Here our U_spin was built as coefficients U[a,mu]; empirically this choice
-# can differ by conjugation. If results look swapped, use:
-#   Om_loc = U_spin.T @ Om_sub @ U_spin
-# and keep the one that preserves antisymmetry and norm best.
-
-# Enforce antisymmetry numerically
-Om_loc = 0.5*(Om_loc - Om_loc.T)
-
-# 4) build rho2 in pair basis
-rho2_loc, pairs_spin = Omega_to_rho2_pair(Om_loc)
-
-# 5) partial trace over R spin-orbitals
-rhoL0, rhoL1, rhoL2, meta = rhoL_from_rho2_pairs_spin(rho2_loc, pairs_spin, mode_tags_spin)
-
-S_naive = entropy_blockdiag(rhoL0, rhoL1, rhoL2)
-E_acc, (p0,p1,p2) = accessible_entropy(rhoL0, rhoL1, rhoL2)
-
-U_spin = spinorbital_U_from_spatial(U_loc)
-
-for n_state in range(min(20, len(E2))):
-    # spin moments from CI coefficients in the spin-adapted Slater basis
-    S2, Sz, _ = compute_spin_and_entanglement(
-        C2[:, n_state], slater_basis[:n_compute], Nstates
-    )
-
-    # build Ω in delocalised spin-orbitals, truncate, rotate to localised spin-orbitals
-    Om_full = ci_to_spinorbital_Omega(C2[:, n_state], slater_basis[:n_compute], Nstates)
-    Om_sub  = truncate_Omega_to_subspace(Om_full, M_LOC)
-
-    # standard convention for amplitude transform
-    Om_loc  = U_spin.T @ Om_sub @ U_spin
-    Om_loc  = 0.5 * (Om_loc - Om_loc.T)
-
-    # rho2 in pair basis -> partial trace -> entropies
-    rho2_loc, pairs_spin = Omega_to_rho2_pair(Om_loc)
-    rhoL0, rhoL1, rhoL2, _ = rhoL_from_rho2_pairs_spin(rho2_loc, pairs_spin, mode_tags_spin)
-
-    S_naive = entropy_blockdiag(rhoL0, rhoL1, rhoL2)
-    E_acc, (p0, p1, p2) = accessible_entropy(rhoL0, rhoL1, rhoL2)
-
-    print(f"{n_state:3d}  {E2[n_state]:10.4f}  {S2:6.2f}  {Sz:6.2f}  "
-          f"{S_naive:10.5f}  {E_acc:10.5f}  {p0:7.4f}  {p1:7.4f}  {p2:7.4f}")
